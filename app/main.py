@@ -1,59 +1,40 @@
+import logging
+import json
 from fastapi import FastAPI
-from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-import os
-from dotenv import load_dotenv
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import SystemMessage, HumanMessage
 
-# Load API key from .env
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+from app.api.chat import router as chat_router
+from app.core.redis_client import redis_client
+from app.core.config import settings
 
-app = FastAPI()
 
-# Allow frontend access (localhost, or your domain later)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # change to your frontend domain in prod
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="HappyFares Backend - Local", version="0.1.0")
+app.include_router(chat_router, prefix="/api")
 
-# Define request schema
-class ChatRequest(BaseModel):
-    question: str
-    context: dict
 
-@app.post("/api/chat")
-async def chat_endpoint(request: ChatRequest):
-    try:
-        # Init Gemini LLM
-        model = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",   
-            google_api_key=GEMINI_API_KEY,
-        )
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-        # Build prompt
-        system_prompt = """You are a helpful assistant for a flight booking website.
-You MUST ONLY answer using the context provided.
-If the answer is missing, reply: "I cannot find that information on this page."
-Always include a short supporting expert from the context. Give only the answer. Not anything else.Always include a short supporting excerpt from the context"""
 
-        user_prompt = f"""
-User question: {request.question}
 
-Page context:
-{str(request.context)[:12000]}  # limit to avoid oversized input
-"""
 
-        response = await model.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
-        ])
+@app.on_event("startup")
+async def startup_event():
+ logging.info("Starting up - connecting to Redis (or switching to in-memory fallback)")
+ await redis_client.connect()
+ logging.info("Startup completed")
 
-        return {"answer": response.content}
-    except Exception as e:
-        return {"error": str(e)}
+
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logging.info("Shutting down - closing Redis")
+    await redis_client.close()
+
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=settings.APP_PORT, reload=True)
