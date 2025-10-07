@@ -32,7 +32,7 @@ async def chat_endpoint(request: ChatRequest):
     try:
         # Init Gemini LLM
         model = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",  # or gemini-1.5-pro
+            model="gemini-2.5-flash",   
             google_api_key=GEMINI_API_KEY,
         )
 
@@ -40,7 +40,7 @@ async def chat_endpoint(request: ChatRequest):
         system_prompt = """You are a helpful assistant for a flight booking website.
 You MUST ONLY answer using the context provided.
 If the answer is missing, reply: "I cannot find that information on this page."
-Always include a short supporting excerpt from the context. Give only the answer. Not anything else.Always include a short supporting excerpt from the context"""
+Always include a short supporting expert from the context. Give only the answer. Not anything else.Always include a short supporting excerpt from the context"""
 
         user_prompt = f"""
 User question: {request.question}
