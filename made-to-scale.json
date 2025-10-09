@@ -1,0 +1,495 @@
+{
+  "name": "Shoply_AI_Support_Agent_v1",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerOnStartup": false,
+        "filters": {},
+        "options": {
+          "fetch": true,
+          "maxResults": 10,
+          "includeAttachments": true
+        }
+      },
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1,
+      "position": [
+        150,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Parse useful email fields for downstream nodes */\nreturn [\n  {\n    json: {\n      id: $json[\"id\"] || $json[\"messageId\"] || null,\n      from: $json[\"from\"] || ($json[\"headers\"] && $json[\"headers\"].from) || null,\n      subject: $json[\"subject\"] || ($json[\"headers\"] && $json[\"headers\"].subject) || null,\n      body: $json[\"textPlain\"] || $json[\"textHtml\"] || $json[\"bodyPlain\"] || '',\n      threadId: $json[\"threadId\"] || null\n    }\n  }\n];"
+      },
+      "name": "Parse Email",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        380,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.2,
+        "top_p": 1,
+        "max_tokens": 400,
+        "additionalFields": {},
+        "prompt": "System: You are Shoply's email triage assistant.\\nTask: Read the customer's email body and return a JSON object with two fields: {\"intent\": one of [\"refund\",\"order_query\",\"product_review\",\"complaint\",\"general\"], \"priority\": one of [\"low\",\"normal\",\"high\"]}.\\nRules:\\n- If message mentions 'refund', 'money back', 'return' -> intent=refund.\\n- If message asks 'where is my order', 'tracking', 'shipped' -> order_query.\\n- If message gives product feedback or asks about product quality but not asking for order -> product_review.\\n- If angry or strongly negative sentiment -> complaint and set priority=high.\\n- Otherwise general.\\nProvide ONLY valid JSON with the fields intent and priority. Use the email body: '''{{$json[\"body\"]}}''' and subject: '{{$json[\"subject\"]}}'.",
+        "responseFormat": "text"
+      },
+      "name": "OpenAI - Classify Intent",
+      "type": "n8n-nodes-base.openai",
+      "typeVersion": 1,
+      "position": [
+        640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const aiOut = items[0].json.text || items[0].json.output || items[0].json.result || items[0].json.choices?.[0]?.text || null;\nlet parsed = { intent: 'general', priority: 'normal' };\ntry {\n  // Attempt parse JSON from AI\n  const maybeJson = aiOut.match(/\\{[\\s\\S]*\\}/);\n  if (maybeJson) parsed = JSON.parse(maybeJson[0]);\n  else parsed = JSON.parse(aiOut);\n} catch (err) {\n  // fallback: try to read lines\n  try {\n    const j = JSON.parse(aiOut.replace(/\\n/g, ''));\n    parsed = j;\n  } catch (e) {\n    // keep defaults\n  }\n}\nreturn [{ json: { intent: parsed.intent || 'general', priority: parsed.priority || 'normal', raw_ai: aiOut, body: items[0].json.body, subject: items[0].json.subject, from: items[0].json.from, threadId: items[0].json.threadId } }];"
+      },
+      "name": "Parse Intent Output",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Try to extract order id using regex first. Common formats: #12345, ORD12345, Order ID: 12345 */\nconst text = (items[0].json.body || '') + '\\n' + (items[0].json.subject || '');\nconst regexes = [ /#(\\d{4,})/g, /Order\\s*ID[:\\s]*([A-Za-z0-9\\-]+)/gi, /ORD\\s*(\\d{3,})/gi, /order\\s*#\\s*(\\d{4,})/gi ];\nlet found = null;\nfor (const r of regexes) {\n  const m = r.exec(text);\n  if (m) { found = m[1] || m[0]; break; }\n}\nreturn [{ json: { orderId: found, body: items[0].json.body, subject: items[0].json.subject, from: items[0].json.from, threadId: items[0].json.threadId } }];"
+      },
+      "name": "Extract OrderID (Regex)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        380,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$node[\"Parse Intent Output\"].json[\"intent\"]}}",
+              "operation": "isIn",
+              "value2": "refund,order_query,product_review,complaint,general"
+            }
+          ]
+        }
+      },
+      "name": "Intent Switch",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* If no orderId from regex, ask OpenAI to extract it from body as fallback */\nif (items[0].json.orderId) {\n  return [{ json: { orderId: items[0].json.orderId } }];\n}\nconst body = items[0].json.body || '';\nreturn [{ json: { prompt: `Extract possible order id from the following customer email. Reply only with the order id or an empty string if none present.\\n\\n${body}` } }];"
+      },
+      "name": "OrderID Fallback Or Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        640,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "top_p": 1,
+        "max_tokens": 50,
+        "prompt": "{{$json[\"prompt\"]}}",
+        "responseFormat": "text"
+      },
+      "name": "OpenAI - Extract OrderID (Fallback)",
+      "type": "n8n-nodes-base.openai",
+      "typeVersion": 1,
+      "position": [
+        880,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "let orderId = $node[\"Extract OrderID (Regex)\"].json.orderId || null;\nif (!orderId) {\n  const aiText = items[0].json.text || items[0].json.choices?.[0]?.text || items[0].json.output || '';\n  const clean = aiText.replace(/[^A-Za-z0-9\\-#]/g, '').trim();\n  orderId = clean || null;\n}\nreturn [{ json: { orderId } }];"
+      },
+      "name": "Parse OrderID Fallback",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "order",
+        "operation": "get",
+        "id": "={{$node[\"Parse OrderID Fallback\"].json[\"orderId\"]}}",
+        "additionalFields": {}
+      },
+      "name": "Shopify - Get Order",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [
+        1440,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Build context to send to OpenAI for reply generation. If order exists, include key details. */\nconst incoming = $node[\"Parse Email\"].json;\nconst intentInfo = $node[\"Parse Intent Output\"].json;\nconst order = $node[\"Shopify - Get Order\"].json || {};\nlet orderSummary = '';\nif (order && Object.keys(order).length) {\n  const status = order.financial_status || order.fulfillment_status || order.fulfillments?.[0]?.tracking_company || order.name || '';\n  const tracking = order.fulfillments && order.fulfillments.length ? (order.fulfillments[0].tracking_url || order.fulfillments[0].tracking_number || '') : '';\n  const items = (order.line_items || []).map(i => `${i.quantity} x ${i.title}`).join(', ');\n  orderSummary = `Order: ${order.name || ''}\\nStatus: ${status}\\nItems: ${items}\\nTracking: ${tracking}`;\n}\nconst systemPrompt = `You are Shoply's AI support assistant. Be polite, professional, concise and accurate. If order information is present include it clearly. If order information is missing ask for it. Use this template: Greeting, summary, action items, closing.`;\nconst customerEmail = incoming.body || '';\nconst prompt = `${systemPrompt}\\n\\nCustomer Email:\\n${customerEmail}\\n\\nIntent: ${intentInfo.intent} (priority: ${intentInfo.priority})\\n\\nOrderContext:\\n${orderSummary}\\n\\nWrite a reply as a draft to be placed in Gmail. Keep it short (3-6 sentences) and include any tracking link if available.`;\nreturn [{ json: { prompt } }];"
+      },
+      "name": "Build Reply Prompt",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "model": "gpt-4o-mini",
+        "temperature": 0.15,
+        "top_p": 1,
+        "max_tokens": 500,
+        "prompt": "{{$json[\"prompt\"]}}",
+        "responseFormat": "text"
+      },
+      "name": "OpenAI - Generate Reply Draft",
+      "type": "n8n-nodes-base.openai",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "toEmail": "={{$node[\"Parse Email\"].json.from}}",
+        "subject": "={{'Re: ' + $node['Parse Email'].json.subject}}",
+        "message": "={{$node['OpenAI - Generate Reply Draft'].json.choices ? $node['OpenAI - Generate Reply Draft'].json.choices[0].text : $node['OpenAI - Generate Reply Draft'].json.text}}",
+        "options": {}
+      },
+      "name": "Gmail - Create Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "channel": "#support-automation",
+        "text": "={{`[Shoply Bot] - Email from: ${$node['Parse Email'].json.from}\\nIntent: ${$node['Parse Intent Output'].json.intent}\\nOrderId: ${$node['Parse OrderID Fallback'].json.orderId || 'none'}\\nPriority: ${$node['Parse Intent Output'].json.priority}`}}",
+        "attachments": ""
+      },
+      "name": "Slack - Notify Support Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Add Gmail labels depending on intent */\nconst intent = $node[\"Parse Intent Output\"].json.intent || 'general';\nlet label = 'general';\nswitch(intent) {\n  case 'refund': label = 'refund'; break;\n  case 'order_query': label = 'order query'; break;\n  case 'product_review': label = 'product review'; break;\n  case 'complaint': label = 'complaint'; break;\n}\nreturn [{ json: { label } }];"
+      },
+      "name": "Decide Gmail Label",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "labels",
+        "operation": "add",
+        "options": {},
+        "labelName": "={{$node[\"Decide Gmail Label\"].json.label}}",
+        "id": "={{$node[\"Parse Email\"].json.id}}"
+      },
+      "name": "Gmail - Add Label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "/* Error handler helper node. Not a true 'catch' but used in connect-on-error chains. */\nreturn [{ json: { message: 'An error occurred in the previous step', details: items[0].json } }];"
+      },
+      "name": "Error Handler (noop)",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "postMessage",
+        "text": "={{`[Shoply Bot - ERROR] Node failure. Email from ${$node['Parse Email'].json.from}. Check n8n execution logs.`}}",
+        "channel": "#support-automation"
+      },
+      "name": "Slack - Error Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        760
+      ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Email": {
+      "main": [
+        [
+          {
+            "node": "Extract OrderID (Regex)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OpenAI - Classify Intent",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Decide Gmail Label",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Classify Intent": {
+      "main": [
+        [
+          {
+            "node": "Parse Intent Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract OrderID (Regex)": {
+      "main": [
+        [
+          {
+            "node": "OrderID Fallback Or Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OrderID Fallback Or Prompt": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Extract OrderID (Fallback)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Extract OrderID (Fallback)": {
+      "main": [
+        [
+          {
+            "node": "Parse OrderID Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse OrderID Fallback": {
+      "main": [
+        [
+          {
+            "node": "Shopify - Get Order",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Reply Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Intent Output": {
+      "main": [
+        [
+          {
+            "node": "Intent Switch",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Reply Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Switch": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Add Label",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack - Notify Support Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shopify - Get Order": {
+      "main": [
+        [
+          {
+            "node": "Build Reply Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "error": [
+        [
+          {
+            "node": "Error Handler (noop)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Reply Prompt": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Generate Reply Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Generate Reply Draft": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Create Draft",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack - Notify Support Channel",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ],
+      "error": [
+        [
+          {
+            "node": "Error Handler (noop)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Add Label": {
+      "main": [
+        [
+          {
+            "node": "Gmail - Create Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail - Create Draft": {
+      "main": [
+        [
+          {
+            "node": "Slack - Notify Support Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "error": [
+        [
+          {
+            "node": "Error Handler (noop)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Handler (noop)": {
+      "main": [
+        [
+          {
+            "node": "Slack - Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

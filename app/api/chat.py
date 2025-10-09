@@ -24,7 +24,9 @@ async def chat_endpoint(req: ChatRequest):
 
     # Store context (short TTL) to act as the session's page context
     try:
-        await redis_client.set_context(req.session_id, req.context)
+        import json
+        await redis_client.set(req.session_id, json.dumps(req.context))
+
     except Exception:
         logging.exception("Failed to set context in Redis — continuing with request")
 
